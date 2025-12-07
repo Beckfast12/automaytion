@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Sora → YouTube Auto Poster</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="card">
+    <div class="header-row">
+      <div>
+        <h1>🎬 Sora → YouTube Auto Poster</h1>
+        <p class="subtitle">
+          Connect your YouTube account, then type a Sora prompt and auto-upload the video.
+        </p>
+      </div>
+      <span class="badge">v1 • full stack</span>
+    </div>
+
+    <div class="row">
+      <div class="pill" id="ytStatus">
+        <span class="dot" id="ytDot"></span>
+        <span>YouTube: checking…</span>
+      </div>
+      <div class="pill" id="aiStatus">
+        <span class="dot" id="aiDot"></span>
+        <span>OpenAI: checking…</span>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button id="connectYouTubeBtn" class="secondary" type="button">
+        🔗 Connect YouTube
+      </button>
+      <button id="generateBtnTop" class="primary" type="button">
+        ⚡ Generate & Upload
+      </button>
+    </div>
+
+    <div class="hint">
+      This page talks to your Node backend at the same origin
+      (<code>/api/status</code>, <code>/auth/youtube</code>, <code>/api/generate-and-upload</code>).
+    </div>
+
+    <form id="generateForm">
+      <label for="prompt">Sora prompt</label>
+      <textarea id="prompt" rows="4"
+        placeholder="Example: A 10-second cinematic shot of a robot walking through a neon city at night, volumetric lighting, anime style."></textarea>
+
+      <label for="title">YouTube title (optional)</label>
+      <input id="title" type="text" placeholder="My Sora AI Video" />
+
+      <label for="description">YouTube description (optional)</label>
+      <textarea id="description" rows="3"
+        placeholder="Generated with Sora from this prompt: ..."></textarea>
+
+      <button type="submit" id="generateBtn" class="primary" style="margin-top: 14px;">
+        ⚡ Generate & Upload
+      </button>
+    </form>
+
+    <div id="log"></div>
+  </div>
+
+  <script src="script.js" defer></script>
+</body>
+</html>

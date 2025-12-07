@@ -1,0 +1,206 @@
+// server.js
+require('dotenv').config();
+
+const express = require('express');
+const path = require('path');
+const fs = require('fs');
+const os = require('os');
+const { google } = require('googleapis');
+const OpenAI = require('openai');
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// -------- Static files (frontend) --------
+const publicPath = path.join(__dirname, 'public');
+app.use(express.static(publicPath));
+app.use(express.json());
+
+// -------- OpenAI Sora client --------
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY
+});
+
+// -------- YouTube OAuth client --------
+const oauth2Client = new google.auth.OAuth2(
+  process.env.GOOGLE_CLIENT_ID,
+  process.env.GOOGLE_CLIENT_SECRET,
+  process.env.GOOGLE_REDIRECT_URI
+);
+
+const TOKEN_PATH = path.join(__dirname, 'youtube-token.json');
+
+// Load cached YouTube token if it exists
+if (fs.existsSync(TOKEN_PATH)) {
+  try {
+    const token = JSON.parse(fs.readFileSync(TOKEN_PATH, 'utf8'));
+    oauth2Client.setCredentials(token);
+    console.log('Loaded existing YouTube OAuth token.');
+  } catch (err) {
+    console.error('Failed to read saved YouTube token:', err.message);
+  }
+}
+
+const YOUTUBE_SCOPES = ['https://www.googleapis.com/auth/youtube.upload'];
+
+// -------- API routes --------
+
+// Status for frontend badges
+app.get('/api/status', (req, res) => {
+  const hasYT =
+    !!oauth2Client.credentials?.access_token ||
+    !!oauth2Client.credentials?.refresh_token;
+
+  res.json({
+    youtubeConnected: hasYT,
+    openaiConfigured: !!process.env.OPENAI_API_KEY
+  });
+});
+
+// Start YouTube OAuth flow
+app.get('/auth/youtube', (req, res) => {
+  const authUrl = oauth2Client.generateAuthUrl({
+    access_type: 'offline',
+    scope: YOUTUBE_SCOPES,
+    prompt: 'consent'
+  });
+  res.redirect(authUrl);
+});
+
+// OAuth callback (Google sends ?code=...)
+app.get('/oauth2callback', async (req, res) => {
+  const code = req.query.code;
+  if (!code) {
+    return res.status(400).send('Missing "code" parameter from Google.');
+  }
+
+  try {
+    const { tokens } = await oauth2Client.getToken(code);
+    oauth2Client.setCredentials(tokens);
+    fs.writeFileSync(TOKEN_PATH, JSON.stringify(tokens, null, 2));
+    console.log('Saved YouTube OAuth tokens to', TOKEN_PATH);
+
+    res.send(`
+      <html>
+        <body style="font-family: system-ui; background:#020617; color:#e5e7eb; text-align:center; padding-top:40px;">
+          <h2>YouTube connected ✅</h2>
+          <p>You can close this tab and go back to the app.</p>
+          <script>window.close()</script>
+        </body>
+      </html>
+    `);
+  } catch (err) {
+    console.error('Error during YouTube OAuth callback:', err);
+    res.status(500).send('Error while finishing YouTube auth – check server logs.');
+  }
+});
+
+// Generate Sora video and upload to YouTube
+app.post('/api/generate-and-upload', async (req, res) => {
+  const { prompt, title, description } = req.body || {};
+
+  if (!prompt) {
+    return res.status(400).json({ error: 'Missing "prompt" in request body.' });
+  }
+  if (!process.env.OPENAI_API_KEY) {
+    return res.status(400).json({ error: 'OpenAI API key not configured on server.' });
+  }
+  if (
+    !oauth2Client.credentials?.access_token &&
+    !oauth2Client.credentials?.refresh_token
+  ) {
+    return res.status(400).json({ error: 'YouTube not connected. Click "Connect YouTube" first.' });
+  }
+
+  try {
+    // ---- 1) Create Sora video job ----
+    console.log('Creating Sora video job...');
+    const videoJob = await openai.videos.create({
+      model: 'sora-2',      // model name from OpenAI docs :contentReference[oaicite:1]{index=1}
+      prompt,
+      size: '1280x720',     // 720x1280, 1280x720, 1024x1792, 1792x1024
+      seconds: '8'          // "4", "8", "12", etc
+    });
+
+    console.log('Video job created:', videoJob.id);
+
+    // ---- 2) Poll the job until it finishes ----
+    let job;
+    while (true) {
+      job = await openai.videos.retrieve(videoJob.id);
+      console.log('Video status:', job.status, '- progress:', job.progress);
+
+      if (job.status === 'completed') break;
+      if (job.status === 'failed') {
+        throw new Error('Sora generation failed: ' + JSON.stringify(job.error || {}));
+      }
+
+      // wait 5 seconds then check again
+      await new Promise((resolve) => setTimeout(resolve, 5000));
+    }
+
+    // ---- 3) Download the MP4 content ----
+    console.log('Downloading Sora video...');
+    const responseContent = await openai.videos.downloadContent(videoJob.id);
+    const blob = await responseContent.blob();
+    const buffer = Buffer.from(await blob.arrayBuffer());
+
+    // Save to a temporary file
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sora-video-'));
+    const videoPath = path.join(tempDir, 'video.mp4');
+    fs.writeFileSync(videoPath, buffer);
+    console.log('Video saved to', videoPath);
+
+    // ---- 4) Upload to YouTube ----
+    console.log('Uploading video to YouTube...');
+    const youtube = google.youtube('v3');
+
+    const uploadResponse = await youtube.videos.insert({
+      auth: oauth2Client,
+      part: ['snippet', 'status'],
+      requestBody: {
+        snippet: {
+          title: title || 'Sora Auto Video',
+          description:
+            description || `Generated with Sora from prompt:\n\n${prompt}`,
+          categoryId: process.env.VIDEO_CATEGORY_ID || '24',
+          tags: ['sora', 'openai', 'ai video']
+        },
+        status: {
+          privacyStatus: process.env.VIDEO_PRIVACY_STATUS || 'private'
+        }
+      },
+      media: {
+        body: fs.createReadStream(videoPath)
+      }
+    });
+
+    const videoId = uploadResponse.data.id;
+    const youtubeUrl = `https://www.youtube.com/watch?v=${videoId}`;
+    console.log('YouTube upload complete:', youtubeUrl);
+
+    // Clean temp file
+    try {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    } catch (cleanupErr) {
+      console.warn('Failed to clean temp dir:', cleanupErr.message);
+    }
+
+    return res.json({
+      success: true,
+      youtubeUrl,
+      youtubeVideoId: videoId
+    });
+  } catch (err) {
+    console.error('Error in /api/generate-and-upload:', err);
+    return res.status(500).json({
+      error: 'Something went wrong generating or uploading the video.',
+      details: err.message
+    });
+  }
+});
+
+// -------- Start server --------
+app.listen(PORT, () => {
+  console.log(`Server running at http://localhost:${PORT}`);
+});
